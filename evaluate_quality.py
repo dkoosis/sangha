@@ -16,8 +16,11 @@ After scoring, run reveal_results.py to see correlation with conditions.
 """
 
 import json
+import signal
 import sys
 from pathlib import Path
+
+REQUIRED_KEYS = {"blind_id", "problem_id", "prompt", "completion"}
 
 
 RUBRIC = """
@@ -67,26 +70,47 @@ Note: Score based on the CODE ONLY, not whether it passes tests.
 
 
 def load_blind_data(filepath: str) -> list[dict]:
-    """Load the blind evaluation data."""
+    """Load and validate the blind evaluation data."""
     with open(filepath) as f:
-        return json.load(f)
+        data = json.load(f)
+
+    if not isinstance(data, list):
+        raise ValueError(f"Expected list of samples, got {type(data).__name__}")
+
+    for i, item in enumerate(data):
+        missing = REQUIRED_KEYS - item.keys()
+        if missing:
+            raise ValueError(f"Sample {i} missing required keys: {missing}")
+
+    return data
 
 
 def evaluate_interactively(data: list[dict], output_file: str):
     """Run interactive evaluation session."""
-    
-    print(RUBRIC)
-    print("\n" + "="*60)
-    print(f"Evaluating {len(data)} code samples")
-    print("Enter scores as: edge,error,idiom,doc,ship (e.g., 3,2,4,3,3)")
-    print("Enter 's' to skip, 'q' to quit and save progress")
-    print("="*60 + "\n")
-    
+
     # Load existing scores if any
     scores = {}
     if Path(output_file).exists():
         with open(output_file) as f:
             scores = json.load(f)
+
+    def save_and_exit(signum=None, frame=None):
+        with open(output_file, 'w') as f:
+            json.dump(scores, f, indent=2)
+        print(f"\nProgress saved to {output_file}")
+        print(f"Scored {len(scores)} / {len(data)} samples")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, save_and_exit)
+
+    print(RUBRIC)
+    print("\n" + "="*60)
+    print(f"Evaluating {len(data)} code samples")
+    print("Enter scores as: edge,error,idiom,doc,ship (e.g., 3,2,4,3,3)")
+    print("Enter 's' to skip, 'q' to quit and save progress, Ctrl+C to save and exit")
+    print("="*60 + "\n")
+
+    if scores:
         print(f"Loaded {len(scores)} existing scores\n")
     
     for i, item in enumerate(data):
@@ -99,7 +123,7 @@ def evaluate_interactively(data: list[dict], output_file: str):
         print(f"\n{'='*60}")
         print(f"[{i+1}/{len(data)}] Sample: {blind_id}")
         print(f"Problem: {item['problem_id']}")
-        print(f"Passed tests: {item['passed']}")
+        # NOTE: 'passed' intentionally hidden to prevent bias during blind evaluation
         print("-"*60)
         print("PROMPT:")
         print(item["prompt"])
@@ -112,11 +136,7 @@ def evaluate_interactively(data: list[dict], output_file: str):
             response = input("\nScores (edge,error,idiom,doc,ship) or s/q: ").strip().lower()
             
             if response == 'q':
-                with open(output_file, 'w') as f:
-                    json.dump(scores, f, indent=2)
-                print(f"\nProgress saved to {output_file}")
-                print(f"Scored {len(scores)} / {len(data)} samples")
-                return scores
+                save_and_exit()
             
             if response == 's':
                 print("Skipped")
@@ -161,9 +181,18 @@ def main():
     
     blind_file = sys.argv[1]
     data = load_blind_data(blind_file)
-    
-    # Derive output filename
-    output_file = blind_file.replace("blind_eval_", "scores_")
+
+    # Derive output filename safely
+    if "blind_eval_" in blind_file:
+        output_file = blind_file.replace("blind_eval_", "scores_")
+    else:
+        # Fallback: append _scores before extension
+        p = Path(blind_file)
+        output_file = str(p.with_stem(p.stem + "_scores"))
+
+    if Path(output_file).resolve() == Path(blind_file).resolve():
+        print(f"Error: output file would overwrite input file")
+        sys.exit(1)
     
     scores = evaluate_interactively(data, output_file)
     
